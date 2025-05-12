@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:os"
 import "core:reflect"
 import "core:slice"
+import "core:strings"
 
 MAGIC :: []byte{'\n', 'E', 'L', 'F'}
 
@@ -181,13 +182,78 @@ parse_elf :: proc(fd: os.Handle) -> Parse_Elf_Error {
 
 	_, elf_section_read_err := os.read_at(fd, elf_section_headers_bytes, cast(i64)elf_header.shoff)
 
-	for i := 0; i < len(elf_section_headers_bytes) / 64; i += 1 {
+	sections_amount := len(elf_section_headers_bytes) / 64
+	for i := 0; i < sections_amount; i += 1 {
 		offset := i * 64
 		elf_section_headers[i].name = slice.to_type(
 			elf_section_headers_bytes[offset:offset + 4],
 			u32,
 		)
+		offset += size_of(u32)
+		elf_section_headers[i].type = slice.to_type(
+			elf_section_headers_bytes[offset:offset + size_of(Section_Header_Type)],
+			Section_Header_Type,
+		)
+		offset += size_of(Section_Header_Type)
+		elf_section_headers[i].flags = slice.to_type(
+			elf_section_headers_bytes[offset:offset + size_of(Section_Attribute_Flags)],
+			Section_Attribute_Flags,
+		)
+		offset += size_of(Section_Attribute_Flags)
+		elf_section_headers[i].addr = slice.to_type(
+			elf_section_headers_bytes[offset:offset + size_of(uintptr)],
+			uintptr,
+		)
+		offset += size_of(uintptr)
+		elf_section_headers[i].offset = slice.to_type(
+			elf_section_headers_bytes[offset:offset + size_of(uintptr)],
+			uintptr,
+		)
+		offset += size_of(uintptr)
+		elf_section_headers[i].size = slice.to_type(
+			elf_section_headers_bytes[offset:offset + size_of(uintptr)],
+			uintptr,
+		)
+		offset += size_of(uintptr)
+		elf_section_headers[i].link = slice.to_type(
+			elf_section_headers_bytes[offset:offset + size_of(u32)],
+			u32,
+		)
+		offset += size_of(u32)
+		elf_section_headers[i].info = slice.to_type(
+			elf_section_headers_bytes[offset:offset + size_of(u32)],
+			u32,
+		)
+		offset += size_of(u32)
+		elf_section_headers[i].addralign = slice.to_type(
+			elf_section_headers_bytes[offset:offset + size_of(uintptr)],
+			uintptr,
+		)
+		offset += size_of(uintptr)
+		elf_section_headers[i].entsize = slice.to_type(
+			elf_section_headers_bytes[offset:offset + size_of(uintptr)],
+			uintptr,
+		)
 	}
+
+	names_section := elf_section_headers[elf_header.shstrndx]
+	names_buf := make([]byte, names_section.size)
+	_, names_section_read_err := os.read_at(fd, names_buf, cast(i64)names_section.offset)
+	name_builder := strings.builder_make_len_cap(0, 20)
+	for &header in elf_section_headers {
+		for i := header.name;; i += 1 {
+			ch := names_buf[i]
+			if ch == 0 {
+				break
+			}
+			strings.write_byte(&name_builder, ch)
+		}
+		header.text_name = strings.clone_from_bytes(name_builder.buf[:])
+		fmt.println(header.text_name)
+		strings.builder_reset(&name_builder)
+	}
+	fmt.printfln("%#v", elf_section_headers)
+
 	return .None
 }
 
@@ -260,5 +326,5 @@ Elf_Section_Header :: struct {
 	entsize:   uintptr,
 
 	//
-	i_name:    string,
+	text_name: string,
 }
