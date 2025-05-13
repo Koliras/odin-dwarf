@@ -240,6 +240,7 @@ parse_elf :: proc(fd: os.Handle) -> Parse_Elf_Error {
 	names_buf := make([]byte, names_section.size)
 	_, names_section_read_err := os.read_at(fd, names_buf, cast(i64)names_section.offset)
 	name_builder := strings.builder_make_len_cap(0, 20)
+	ds: Dwarf_Sections
 	for &header in elf_section_headers {
 		for i := header.name;; i += 1 {
 			ch := names_buf[i]
@@ -249,10 +250,11 @@ parse_elf :: proc(fd: os.Handle) -> Parse_Elf_Error {
 			strings.write_byte(&name_builder, ch)
 		}
 		header.text_name = strings.clone_from_bytes(name_builder.buf[:])
-		fmt.println(header.text_name)
+		dwarf_sections_get_from_elf_header(&ds, &header, fd)
 		strings.builder_reset(&name_builder)
 	}
 	fmt.printfln("%#v", elf_section_headers)
+	fmt.printfln("%v", ds)
 
 	return .None
 }
@@ -327,4 +329,102 @@ Elf_Section_Header :: struct {
 
 	//
 	text_name: string,
+}
+
+Dwarf_Sections :: struct {
+	abbrev:      []byte,
+	line:        []byte,
+	info:        []byte,
+	addr:        []byte,
+	aranges:     []byte,
+	frame:       []byte,
+	eh_frame:    []byte,
+	line_str:    []byte,
+	loc:         []byte,
+	loclists:    []byte,
+	names:       []byte,
+	macinfo:     []byte,
+	macro:       []byte,
+	pubnames:    []byte,
+	pubtypes:    []byte,
+	ranges:      []byte,
+	rnglists:    []byte,
+	str:         []byte,
+	str_offsets: []byte,
+	types:       []byte,
+}
+
+dwarf_sections_delete :: proc(ds: ^Dwarf_Sections) {
+	delete(ds.abbrev)
+	delete(ds.line)
+	delete(ds.info)
+	delete(ds.addr)
+	delete(ds.aranges)
+	delete(ds.frame)
+	delete(ds.eh_frame)
+	delete(ds.line_str)
+	delete(ds.loc)
+	delete(ds.loclists)
+	delete(ds.names)
+	delete(ds.macinfo)
+	delete(ds.macro)
+	delete(ds.pubnames)
+	delete(ds.pubtypes)
+	delete(ds.ranges)
+	delete(ds.rnglists)
+	delete(ds.str)
+	delete(ds.str_offsets)
+	delete(ds.types)
+}
+
+dwarf_sections_get_from_elf_header :: proc(
+	ds: ^Dwarf_Sections,
+	header: ^Elf_Section_Header,
+	fd: os.Handle,
+) {
+	buf := make([]byte, header.size)
+	os.read(fd, buf)
+
+	switch header.text_name {
+	case ".debug_abbrev":
+		ds.abbrev = buf
+	case ".debug_line":
+		ds.line = buf
+	case ".debug_info":
+		ds.info = buf
+	case ".debug_addr":
+		ds.addr = buf
+	case ".debug_aranges":
+		ds.aranges = buf
+	case ".debug_frame":
+		ds.frame = buf
+	case ".eh_frame":
+		ds.eh_frame = buf
+	case ".debug_line_str":
+		ds.line_str = buf
+	case ".debug_loc":
+		ds.loc = buf
+	case ".debug_loclists":
+		ds.loclists = buf
+	case ".debug_names":
+		ds.names = buf
+	case ".debug_macinfo":
+		ds.macinfo = buf
+	case ".debug_macro":
+		ds.macro = buf
+	case ".debug_pubnames":
+		ds.pubnames = buf
+	case ".debug_pubtypes":
+		ds.pubtypes = buf
+	case ".debug_ranges":
+		ds.ranges = buf
+	case ".debug_rnglists":
+		ds.rnglists = buf
+	case ".debug_str":
+		ds.str = buf
+	case ".debug_str_offsets":
+		ds.str_offsets = buf
+	case ".debug_types":
+		ds.types = buf
+	}
 }
