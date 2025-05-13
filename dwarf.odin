@@ -1,7 +1,7 @@
 package dwarf
 
 import "core:fmt"
-import "core:os"
+import os "core:os/os2"
 import "core:reflect"
 import "core:slice"
 import "core:strings"
@@ -149,7 +149,7 @@ ident_init :: proc(ident: ^Ident, bytes: [16]byte) -> Parse_Elf_Error {
 	return .None
 }
 
-parse_elf :: proc(fd: os.Handle) -> Parse_Elf_Error {
+parse_elf :: proc(fd: ^os.File) -> Parse_Elf_Error {
 	ident: [16]byte
 	_, magic_err := os.read(fd, ident[:])
 	assert(magic_err == nil)
@@ -241,6 +241,7 @@ parse_elf :: proc(fd: os.Handle) -> Parse_Elf_Error {
 	_, names_section_read_err := os.read_at(fd, names_buf, cast(i64)names_section.offset)
 	name_builder := strings.builder_make_len_cap(0, 20)
 	ds: Dwarf_Sections
+	dynamic_header: ^Elf_Section_Header
 	for &header in elf_section_headers {
 		for i := header.name;; i += 1 {
 			ch := names_buf[i]
@@ -251,8 +252,13 @@ parse_elf :: proc(fd: os.Handle) -> Parse_Elf_Error {
 		}
 		header.text_name = strings.clone_from_bytes(name_builder.buf[:])
 		dwarf_sections_get_from_elf_header(&ds, &header, fd)
+		if header.text_name == ".dynamic" {
+			dynamic_header = &header
+		}
 		strings.builder_reset(&name_builder)
 	}
+	dynamic_buf := make([]byte, dynamic_header.size)
+	os.read_at(fd, dynamic_buf, cast(i64)dynamic_header.offset)
 	fmt.printfln("%#v", elf_section_headers)
 	fmt.printfln("%v", ds)
 
@@ -380,10 +386,10 @@ dwarf_sections_delete :: proc(ds: ^Dwarf_Sections) {
 dwarf_sections_get_from_elf_header :: proc(
 	ds: ^Dwarf_Sections,
 	header: ^Elf_Section_Header,
-	fd: os.Handle,
+	fd: ^os.File,
 ) {
 	buf := make([]byte, header.size)
-	os.read(fd, buf)
+	os.read_at(fd, buf, cast(i64)header.offset)
 
 	switch header.text_name {
 	case ".debug_abbrev":
