@@ -257,10 +257,28 @@ parse_elf :: proc(fd: ^os.File) -> Parse_Elf_Error {
 		}
 		strings.builder_reset(&name_builder)
 	}
-	dynamic_buf := make([]byte, dynamic_header.size)
-	os.read_at(fd, dynamic_buf, cast(i64)dynamic_header.offset)
 	fmt.printfln("%#v", elf_section_headers)
 	fmt.printfln("%v", ds)
+	dynamic_buf := make([]byte, dynamic_header.size)
+	os.read_at(fd, dynamic_buf, cast(i64)dynamic_header.offset)
+	pie: bool
+	for i := 0; i < len(dynamic_buf) / 8; i += 2 {
+		off := i * 8
+		if off + 16 > len(dynamic_buf) {
+			break
+		}
+
+		tag := slice.to_type(dynamic_buf[off:off + 8], uintptr)
+		val := slice.to_type(dynamic_buf[off + 8:off + 16], uintptr)
+
+		if tag == 0x6fff_fffb { 	// DT_FLAGS_1
+			if val & 0x0800_0000 > 0 { 	// DF_1_PIE
+				pie = true
+				break
+			}
+		}
+	}
+
 
 	return .None
 }
