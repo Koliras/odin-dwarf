@@ -1,7 +1,7 @@
 package dwarf
 
-import "core:os"
 import "core:fmt"
+import os "core:os/os2"
 
 // procedure just for testing
 main :: proc() {
@@ -9,4 +9,3 @@ main :: proc() {
 	assert(open_err == nil)
 	fmt.println(parse_elf(fd))
 }
-

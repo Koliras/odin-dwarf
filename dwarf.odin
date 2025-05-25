@@ -157,6 +157,7 @@ parse_elf :: proc(fd: ^os.File) -> Parse_Elf_Error {
 		return .Incorect_Magic
 	}
 
+	// Start getting Elf_Ehdr
 	elf_header: Elf_Ehdr
 	ident_init_err := ident_init(&elf_header.ident, ident)
 	elf_ehdr_bytes: [48]byte
@@ -175,8 +176,9 @@ parse_elf :: proc(fd: ^os.File) -> Parse_Elf_Error {
 	elf_header.shentsize = slice.to_type(elf_ehdr_bytes[42:44], u16)
 	elf_header.shnum = slice.to_type(elf_ehdr_bytes[44:46], u16)
 	elf_header.shstrndx = slice.to_type(elf_ehdr_bytes[46:], u16)
-	fmt.printfln("%#v", elf_header)
+	// End getting Elf_Ehdr
 
+	// Start getting elf section headers
 	elf_section_headers := make([]Elf_Section_Header, elf_header.shnum)
 	elf_section_headers_bytes := make([]byte, elf_header.shentsize * elf_header.shnum)
 
@@ -185,7 +187,7 @@ parse_elf :: proc(fd: ^os.File) -> Parse_Elf_Error {
 	sections_amount := len(elf_section_headers_bytes) / 64
 	for i := 0; i < sections_amount; i += 1 {
 		offset := i * 64
-		elf_section_headers[i].name = slice.to_type(
+		elf_section_headers[i].name_offset = slice.to_type(
 			elf_section_headers_bytes[offset:offset + 4],
 			u32,
 		)
@@ -235,7 +237,9 @@ parse_elf :: proc(fd: ^os.File) -> Parse_Elf_Error {
 			uintptr,
 		)
 	}
+	// Finish getting elf section headers basic data
 
+	// Start getting elf section headers names
 	names_section := elf_section_headers[elf_header.shstrndx]
 	names_buf := make([]byte, names_section.size)
 	_, names_section_read_err := os.read_at(fd, names_buf, cast(i64)names_section.offset)
@@ -243,22 +247,24 @@ parse_elf :: proc(fd: ^os.File) -> Parse_Elf_Error {
 	ds: Dwarf_Sections
 	dynamic_header: ^Elf_Section_Header
 	for &header in elf_section_headers {
-		for i := header.name;; i += 1 {
+		for i := header.name_offset;; i += 1 {
 			ch := names_buf[i]
 			if ch == 0 {
 				break
 			}
 			strings.write_byte(&name_builder, ch)
 		}
-		header.text_name = strings.clone_from_bytes(name_builder.buf[:])
+		header.name = strings.clone_from_bytes(name_builder.buf[:])
 		dwarf_sections_get_from_elf_header(&ds, &header, fd)
-		if header.text_name == ".dynamic" {
+		if header.name == ".dynamic" {
 			dynamic_header = &header
 		}
 		strings.builder_reset(&name_builder)
 	}
-	fmt.printfln("%#v", elf_section_headers)
-	fmt.printfln("%v", ds)
+	// Finish getting elf section headers names
+	// Finish getting all elf section headers data
+
+	// Start determining if elf file is pie(position independent executable)
 	dynamic_buf := make([]byte, dynamic_header.size)
 	os.read_at(fd, dynamic_buf, cast(i64)dynamic_header.offset)
 	pie: bool
@@ -278,7 +284,7 @@ parse_elf :: proc(fd: ^os.File) -> Parse_Elf_Error {
 			}
 		}
 	}
-
+	// Finish determining if elf file is pie(position independent executable)
 
 	return .None
 }
@@ -340,19 +346,19 @@ Section_Attribute_Flag :: enum uint {
 }
 
 Elf_Section_Header :: struct {
-	name:      u32,
-	type:      Section_Header_Type,
-	flags:     Section_Attribute_Flags,
-	addr:      uintptr,
-	offset:    uintptr,
-	size:      uintptr,
-	link:      u32,
-	info:      u32,
-	addralign: uintptr,
-	entsize:   uintptr,
+	name_offset: u32,
+	type:        Section_Header_Type,
+	flags:       Section_Attribute_Flags,
+	addr:        uintptr,
+	offset:      uintptr,
+	size:        uintptr,
+	link:        u32,
+	info:        u32,
+	addralign:   uintptr,
+	entsize:     uintptr,
 
-	//
-	text_name: string,
+	// text name received from dynamic header using `name_offset`
+	name:        string,
 }
 
 Dwarf_Sections :: struct {
@@ -409,7 +415,7 @@ dwarf_sections_get_from_elf_header :: proc(
 	buf := make([]byte, header.size)
 	os.read_at(fd, buf, cast(i64)header.offset)
 
-	switch header.text_name {
+	switch header.name {
 	case ".debug_abbrev":
 		ds.abbrev = buf
 	case ".debug_line":
