@@ -1,6 +1,9 @@
 package dwarf
 
+import "core:bytes"
+import "core:encoding/varint"
 import "core:fmt"
+import "core:io"
 import os "core:os/os2"
 import "core:reflect"
 import "core:slice"
@@ -284,7 +287,7 @@ parse_elf :: proc(fd: ^os.File) -> Parse_Elf_Error {
 			}
 		}
 	}
-	// Finish determining if elf file is pie(position independent executable)
+	// Finish determining if elf file is pie
 
 	return .None
 }
@@ -457,4 +460,97 @@ dwarf_sections_get_from_elf_header :: proc(
 	case ".debug_types":
 		ds.types = buf
 	}
+}
+
+Abbrev_Table :: struct {
+	offset: int,
+	decls:  map[u64]Abbrev_Decl,
+}
+
+Abbrev_Decl :: struct {
+	code:         u64,
+	tag:          u64,
+	has_children: u8,
+	attributes:   [dynamic]Abbrev_Attribute,
+}
+
+Abbrev_Attribute :: struct {
+	name:               u64,
+	form:               u64,
+	implicit_const_val: i64,
+}
+
+
+_decode_uleb_buffer :: #force_inline proc(
+	buf: ^bytes.Buffer,
+) -> (
+	val: u128,
+	size: int,
+	err: varint.Error,
+) {
+	val, size, err = varint.decode_uleb128_buffer(buf.buf[buf.off:])
+	buf.off += size
+	return
+}
+
+_decode_ileb_buffer :: #force_inline proc(
+	buf: ^bytes.Buffer,
+) -> (
+	val: i128,
+	size: int,
+	err: varint.Error,
+) {
+	val, size, err = varint.decode_ileb128_buffer(buf.buf[buf.off:])
+	buf.off += size
+	return
+}
+
+abbrev_section_to_abbrev_tables :: proc(abbrev_section: []byte) -> [dynamic]Abbrev_Table {
+	buf: bytes.Buffer
+	bytes.buffer_init(&buf, abbrev_section)
+	tables := make([dynamic]Abbrev_Table, 0, 10)
+
+	for !bytes.buffer_is_empty(&buf) {
+		table: Abbrev_Table = {
+			offset = buf.off,
+			decls  = make(map[u64]Abbrev_Decl),
+		}
+		for {
+			decl: Abbrev_Decl = {
+				attributes = make([dynamic]Abbrev_Attribute, 0, 10),
+			}
+			code_val, code_bytes_read, uleb_code_err := _decode_uleb_buffer(&buf)
+			decl.code = cast(u64)code_val
+			if decl.code == 0 {
+				break // finished this decl
+			}
+			tag_val, tag_bytes_read, uleb_tag_err := _decode_uleb_buffer(&buf)
+			decl.tag = cast(u64)tag_val
+			read_err: io.Error
+			decl.has_children, read_err = bytes.buffer_read_byte(&buf)
+
+			for {
+				attr: Abbrev_Attribute
+				name_val, name_bytes_read, uleb_name_err := _decode_uleb_buffer(&buf)
+				attr.name = cast(u64)name_val
+				form_val, form_bytes_read, uleb_form_err := _decode_uleb_buffer(&buf)
+				attr.form = cast(u64)form_val
+
+				if attr.form | attr.name == 0 {
+					break
+				}
+
+				if attr.form == 0x21 { 	// DW_FORM_implicit_const
+					const_val, const_bytes_read, ileb_const_err := _decode_ileb_buffer(&buf)
+					attr.implicit_const_val = cast(i64)const_val
+				}
+
+				append(&decl.attributes, attr)
+			}
+
+			table.decls[decl.code] = decl
+		}
+		append(&tables, table)
+	}
+	return tables
 }
