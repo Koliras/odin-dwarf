@@ -13,7 +13,7 @@ MAGIC :: []byte{'\n', 'E', 'L', 'F'}
 
 Parse_Elf_Error :: enum {
 	None,
-	Incorect_Magic,
+	Incorrect_Magic,
 	Incorrect_Ident_Class,
 	Incorrect_Ident_Data_Format,
 	Incorrect_Ident_Version,
@@ -157,7 +157,7 @@ parse_elf :: proc(fd: ^os.File) -> Parse_Elf_Error {
 	_, magic_err := os.read(fd, ident[:])
 	assert(magic_err == nil)
 	if slice.equal(ident[:4], MAGIC) {
-		return .Incorect_Magic
+		return .Incorrect_Magic
 	}
 
 	// Start getting Elf_Ehdr
@@ -184,6 +184,7 @@ parse_elf :: proc(fd: ^os.File) -> Parse_Elf_Error {
 	// Start getting elf section headers
 	elf_section_headers := make([]Elf_Section_Header, elf_header.shnum)
 	elf_section_headers_bytes := make([]byte, elf_header.shentsize * elf_header.shnum)
+	defer delete(elf_section_headers_bytes)
 
 	_, elf_section_read_err := os.read_at(fd, elf_section_headers_bytes, cast(i64)elf_header.shoff)
 
@@ -264,6 +265,8 @@ parse_elf :: proc(fd: ^os.File) -> Parse_Elf_Error {
 		}
 		strings.builder_reset(&name_builder)
 	}
+	strings.builder_destroy(&name_builder)
+	delete(names_buf)
 	// Finish getting elf section headers names
 	// Finish getting all elf section headers data
 
@@ -273,7 +276,7 @@ parse_elf :: proc(fd: ^os.File) -> Parse_Elf_Error {
 	pie: bool
 	for i := 0; i < len(dynamic_buf) / 8; i += 2 {
 		off := i * 8
-		if off + 16 > len(dynamic_buf) {
+		if off + 16 >= len(dynamic_buf) {
 			break
 		}
 
@@ -287,6 +290,7 @@ parse_elf :: proc(fd: ^os.File) -> Parse_Elf_Error {
 			}
 		}
 	}
+	delete(dynamic_buf)
 	// Finish determining if elf file is pie
 
 	return .None
@@ -469,26 +473,74 @@ Abbrev_Table :: struct {
 
 Abbrev_Decl :: struct {
 	code:         u64,
-	tag:          u64,
+	tag:          Dwarf_Tag,
 	has_children: u8,
 	attributes:   [dynamic]Abbrev_Attribute,
 }
 
 Abbrev_Attribute :: struct {
 	name:               u64,
-	form:               u64,
+	form:               Dwarf_Form,
 	implicit_const_val: i64,
+}
+
+Dwarf_Form :: enum u64 {
+	Addr           = 0x01,
+	Block2         = 0x03,
+	Block4         = 0x04,
+	Data2          = 0x05,
+	Data4          = 0x06,
+	Data8          = 0x07,
+	String         = 0x08,
+	Block          = 0x09,
+	Block1         = 0x0a,
+	Data1          = 0x0b,
+	Flag           = 0x0c,
+	Sdata          = 0x0d,
+	Strp           = 0x0e,
+	Udata          = 0x0f,
+	Ref_Addr       = 0x10,
+	Ref1           = 0x11,
+	Ref2           = 0x12,
+	Ref4           = 0x13,
+	Ref8           = 0x14,
+	Ref_Udata      = 0x15,
+	Indirect       = 0x16,
+	Sec_Offset     = 0x17,
+	Exprloc        = 0x18,
+	Flag_Present   = 0x19,
+	Strx           = 0x1a,
+	Addrx          = 0x1b,
+	Ref_Sup4       = 0x1c,
+	Strp_Sup       = 0x1d,
+	Data16         = 0x1e,
+	Line_Strp      = 0x1f,
+	Ref_Sig8       = 0x20,
+	Implicit_Const = 0x21,
+	Loclistx       = 0x22,
+	Rnglistx       = 0x23,
+	Ref_Sup8       = 0x24,
+	Strx1          = 0x25,
+	Strx2          = 0x26,
+	Strx3          = 0x27,
+	Strx4          = 0x28,
+	Addrx1         = 0x29,
+	Addrx2         = 0x2a,
+	Addrx3         = 0x2b,
+	Addrx4         = 0x2c,
 }
 
 
 _decode_uleb_buffer :: #force_inline proc(
 	buf: ^bytes.Buffer,
 ) -> (
-	val: u128,
+	val: u64,
 	size: int,
 	err: varint.Error,
 ) {
-	val, size, err = varint.decode_uleb128_buffer(buf.buf[buf.off:])
+	val_128: u128
+	val_128, size, err = varint.decode_uleb128_buffer(buf.buf[buf.off:])
+	val = cast(u64)val_128
 	buf.off += size
 	return
 }
@@ -496,11 +548,13 @@ _decode_uleb_buffer :: #force_inline proc(
 _decode_ileb_buffer :: #force_inline proc(
 	buf: ^bytes.Buffer,
 ) -> (
-	val: i128,
+	val: i64,
 	size: int,
 	err: varint.Error,
 ) {
-	val, size, err = varint.decode_ileb128_buffer(buf.buf[buf.off:])
+	val_128: i128
+	val_128, size, err = varint.decode_ileb128_buffer(buf.buf[buf.off:])
+	val = cast(i64)val_128
 	buf.off += size
 	return
 }
@@ -508,6 +562,7 @@ _decode_ileb_buffer :: #force_inline proc(
 abbrev_section_to_abbrev_tables :: proc(abbrev_section: []byte) -> [dynamic]Abbrev_Table {
 	buf: bytes.Buffer
 	bytes.buffer_init(&buf, abbrev_section)
+	defer bytes.buffer_destroy(&buf)
 	tables := make([dynamic]Abbrev_Table, 0, 10)
 
 	for !bytes.buffer_is_empty(&buf) {
@@ -520,29 +575,29 @@ abbrev_section_to_abbrev_tables :: proc(abbrev_section: []byte) -> [dynamic]Abbr
 				attributes = make([dynamic]Abbrev_Attribute, 0, 10),
 			}
 			code_val, code_bytes_read, uleb_code_err := _decode_uleb_buffer(&buf)
-			decl.code = cast(u64)code_val
+			decl.code = code_val
 			if decl.code == 0 {
 				break // finished this decl
 			}
 			tag_val, tag_bytes_read, uleb_tag_err := _decode_uleb_buffer(&buf)
-			decl.tag = cast(u64)tag_val
+			decl.tag = cast(Dwarf_Tag)tag_val
 			read_err: io.Error
 			decl.has_children, read_err = bytes.buffer_read_byte(&buf)
 
 			for {
 				attr: Abbrev_Attribute
 				name_val, name_bytes_read, uleb_name_err := _decode_uleb_buffer(&buf)
-				attr.name = cast(u64)name_val
+				attr.name = name_val
 				form_val, form_bytes_read, uleb_form_err := _decode_uleb_buffer(&buf)
-				attr.form = cast(u64)form_val
+				attr.form = cast(Dwarf_Form)form_val
 
-				if attr.form | attr.name == 0 {
+				if cast(u64)attr.form | attr.name == 0 {
 					break
 				}
 
-				if attr.form == 0x21 { 	// DW_FORM_implicit_const
+				if attr.form == .Implicit_Const { 	// DW_FORM_implicit_const
 					const_val, const_bytes_read, ileb_const_err := _decode_ileb_buffer(&buf)
-					attr.implicit_const_val = cast(i64)const_val
+					attr.implicit_const_val = const_val
 				}
 
 				append(&decl.attributes, attr)
@@ -553,4 +608,294 @@ abbrev_section_to_abbrev_tables :: proc(abbrev_section: []byte) -> [dynamic]Abbr
 		append(&tables, table)
 	}
 	return tables
+}
+
+Compilation_Unit :: struct {
+	header: ^Compilation_Unit_Header,
+	dies:   [dynamic]Debugging_Information_Entry,
+}
+
+Compilation_Unit_Header :: struct {
+	length:              uint,
+	version:             u16,
+	unit_type:           Unit_Header_Type,
+	addr_size:           u8,
+	debug_abbrev_offset: u64,
+
+	// not part of dwarf but useful
+	is_32:               bool,
+}
+
+Unit_Header_Type :: enum u8 {
+	None          = 0x00, // in case of DWARF version < 5
+	Compile       = 0x01,
+	Type          = 0x02,
+	Partial       = 0x03,
+	Skeleton      = 0x04,
+	Split_Compile = 0x05,
+	Split_Type    = 0x06,
+	Lo_User       = 0x80,
+	Hi_User       = 0xff,
+}
+
+Debugging_Information_Entry :: struct {
+	offset: int,
+	depth:  int,
+	tag:    Dwarf_Tag,
+	forms:  [dynamic]Form,
+}
+
+Form :: struct {
+	data:  Form_Data,
+	class: Form_Class,
+}
+
+Form_Data :: union #no_nil {
+	u8,
+	u16,
+	u32,
+	u64,
+	i64,
+	[]byte,
+	string,
+	uintptr,
+}
+
+Form_Class :: enum {
+	Address,
+	Addrptr,
+	Block,
+	Constant,
+	Exprloc,
+	Flag,
+	Lineptr,
+	Loclist,
+	Loclistptr,
+	Macptr,
+	Rnglist,
+	Rnglistsptr,
+	Reference,
+	String,
+	Stroffsetsptr,
+}
+
+compilation_unit_from_bytes :: proc(
+	info_section: []byte,
+	abbrev_tables: []Abbrev_Table,
+	sections: ^Dwarf_Sections,
+) -> [dynamic]Compilation_Unit {
+	cus := make([dynamic]Compilation_Unit, 0, 10)
+	buf: bytes.Buffer
+	bytes.buffer_init(&buf, info_section)
+	for {
+		if bytes.buffer_is_empty(&buf) {
+			break
+		}
+		cu_header := compilation_unit_header_from_buf(&buf)
+
+		abbrev_table := &abbrev_tables[0]
+		debug_abbrev_offset := cast(int)cu_header.debug_abbrev_offset
+		for &table in abbrev_tables {
+			if table.offset == debug_abbrev_offset {
+				abbrev_table = &table
+				break
+			}
+		}
+
+		cu := compilation_unit_parse(&buf, &cu_header, sections, abbrev_table)
+		append(&cus, cu)
+	}
+	return cus
+}
+
+compilation_unit_header_from_buf :: proc(buf: ^bytes.Buffer) -> (cuh: Compilation_Unit_Header) {
+	off := 0
+
+	cuh_bytes: [24]byte
+	bytes.buffer_read(buf, cuh_bytes[:])
+	len_32 := slice.to_type(cuh_bytes[:4], u32)
+	if len_32 != 0xffffffff {
+		cuh.is_32 = true
+		cuh.length = cast(uint)len_32
+		off += 4
+	} else {
+		len_64 := slice.to_type(cuh_bytes[4:12], u64)
+		cuh.length = cast(uint)len_64
+		off += 12
+	}
+
+	cuh.version = slice.to_type(cuh_bytes[off:off + 2], u16)
+	off += 2
+
+	if cuh.version >= 5 {
+		// unit_type appeared only in DWARF 5
+		cuh.unit_type = slice.to_type(cuh_bytes[off:off + 1], Unit_Header_Type)
+		off += 1
+
+		cuh.addr_size = slice.to_type(cuh_bytes[off:off + 1], u8)
+		off += 1
+		if cuh.is_32 {
+			cuh.debug_abbrev_offset = cast(u64)slice.to_type(cuh_bytes[off:off + 4], u32)
+			off += 4
+		} else {
+			cuh.debug_abbrev_offset = slice.to_type(cuh_bytes[off:off + 8], u64)
+			off += 8
+		}
+	} else {
+		if cuh.is_32 {
+			cuh.debug_abbrev_offset = cast(u64)slice.to_type(cuh_bytes[off:off + 4], u32)
+			off += 4
+		} else {
+			cuh.debug_abbrev_offset = slice.to_type(cuh_bytes[off:off + 8], u64)
+			off += 8
+		}
+		cuh.addr_size = slice.to_type(cuh_bytes[off:off + 1], u8)
+		off += 1
+	}
+	buf.off -= (24 - off) // normalize offset since we could have read more bytes than needed
+
+	return cuh
+}
+
+compilation_unit_parse :: proc(
+	buf: ^bytes.Buffer,
+	cu_header: ^Compilation_Unit_Header,
+	sections: ^Dwarf_Sections,
+	abbrev: ^Abbrev_Table,
+) -> Compilation_Unit {
+	dies := make([dynamic]Debugging_Information_Entry)
+	die_tree_depth := 0
+	for {
+		abbrev_code, _, _ := _decode_uleb_buffer(buf)
+		if abbrev_code == 0 {
+			if die_tree_depth == 1 {
+				break
+			}
+			die_tree_depth -= 1
+			continue
+		}
+
+		decl := abbrev.decls[abbrev_code]
+		die := Debugging_Information_Entry {
+			offset = buf.off,
+			depth  = die_tree_depth,
+			tag    = decl.tag,
+			forms  = make([dynamic]Form),
+		}
+
+		for &attr in decl.attributes {
+			form := choose_form_advance_buf(buf, cu_header, sections, &attr)
+			append(&die.forms, form)
+		}
+
+		append(&dies, die)
+		if decl.has_children == 1 {
+			die_tree_depth += 1
+		}
+	}
+	return {header = cu_header, dies = dies}
+}
+
+choose_form_advance_buf :: proc(
+	buf: ^bytes.Buffer,
+	cu_header: ^Compilation_Unit_Header,
+	sections: ^Dwarf_Sections,
+	attr: ^Abbrev_Attribute,
+) -> Form {
+	form: Form
+
+	switch attr.form {
+	// constants
+	case .Data1:
+		form.data, _ = bytes.buffer_read_byte(buf)
+		form.class = .Constant
+	case .Data2:
+		val: [2]byte
+		bytes.buffer_read(buf, val[:])
+		form.data = slice.to_type(val[:], u16)
+		form.class = .Constant
+	case .Data4:
+		val: [4]byte
+		bytes.buffer_read(buf, val[:])
+		form.data = slice.to_type(val[:], u32)
+		form.class = .Constant
+	case .Data8:
+		val: [8]byte
+		bytes.buffer_read(buf, val[:])
+		form.data = slice.to_type(val[:], u64)
+		form.class = .Constant
+	case .Sdata:
+		form.data, _, _ = _decode_ileb_buffer(buf)
+		form.class = .Constant
+	case .Udata:
+		form.data, _, _ = _decode_uleb_buffer(buf)
+		form.class = .Constant
+	// implicit const
+	case .Implicit_Const:
+		form.data = attr.implicit_const_val
+		form.class = .Constant
+	// address
+	case .Addr:
+		val: [8]byte
+		bytes.buffer_read(buf, val[:])
+		form.data = slice.to_type(val[:], uintptr)
+		form.class = .Address
+	// references
+	case .Ref_Addr:
+		form.data = _read_offset(buf, cu_header.is_32)
+		form.class = .Reference
+	case .Ref1:
+		form.data, _ = bytes.buffer_read_byte(buf)
+		form.class = .Reference
+	case .Ref2:
+		val: [2]byte
+		bytes.buffer_read(buf, val[:])
+		form.data = slice.to_type(val[:], u16)
+		form.class = .Reference
+	case .Ref4:
+		val: [4]byte
+		bytes.buffer_read(buf, val[:])
+		form.data = slice.to_type(val[:], u32)
+		form.class = .Reference
+	case .Ref8:
+		val: [8]byte
+		bytes.buffer_read(buf, val[:])
+		form.data = slice.to_type(val[:], u64)
+		form.class = .Reference
+	// flags
+	case .Flag:
+		form.data, _ = bytes.buffer_read_byte(buf)
+		form.class = .Flag
+	case .Flag_Present:
+		form.data = []byte{1}
+		form.class = .Flag
+	case .String:
+		form.data = buffer_cstring_to_string(buf)
+		form.class = .String
+	case .Strp:
+	}
+	return form
+}
+
+
+_read_offset :: #force_inline proc(buf: ^bytes.Buffer, is_32: bool) -> u64 {
+	if is_32 {
+		val_bytes: [4]byte
+		bytes.buffer_read(buf, val_bytes[:])
+		val := slice.to_type(val_bytes[:], u32)
+		return cast(u64)val
+	}
+	val_bytes: [8]byte
+	bytes.buffer_read(buf, val_bytes[:])
+	val := slice.to_type(val_bytes[:], u64)
+	return val
+}
+
+buffer_cstring_to_string :: proc(buf: ^bytes.Buffer) -> string {
+	str := strings.builder_make_none()
+	defer strings.builder_destroy(&str)
+	for b, _ := bytes.buffer_read_byte(buf); b != 0; b, _ = bytes.buffer_read_byte(buf) {
+		strings.write_byte(&str, b)
+	}
+	return strings.to_string(str)
 }
