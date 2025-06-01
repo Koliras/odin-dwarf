@@ -1,7 +1,6 @@
 package dwarf
 
-Dwarf_Tag :: enum u64 {
-	Padding                    = 0x00,
+Tag :: enum u64 {
 	Array_Type                  = 0x01,
 	Class_Type                  = 0x02,
 	Entry_Point                 = 0x03,
@@ -122,4 +121,3 @@ Dwarf_Tag :: enum u64 {
 	// ZIG extensions.
 	ZIG_Padding                 = 0xfdb1,
 }
-

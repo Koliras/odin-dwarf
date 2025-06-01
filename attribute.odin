@@ -1,6 +1,6 @@
 package dwarf
 
-Dwarf_Attribute :: enum {
+Attribute_Name :: enum u64 {
 	Sibling                        = 0x01,
 	Location                       = 0x02,
 	Name                           = 0x03,

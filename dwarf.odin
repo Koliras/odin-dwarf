@@ -4,6 +4,7 @@ import "core:bytes"
 import "core:encoding/varint"
 import "core:fmt"
 import "core:io"
+import "core:mem"
 import os "core:os/os2"
 import "core:reflect"
 import "core:slice"
@@ -248,7 +249,7 @@ parse_elf :: proc(fd: ^os.File) -> Parse_Elf_Error {
 	names_buf := make([]byte, names_section.size)
 	_, names_section_read_err := os.read_at(fd, names_buf, cast(i64)names_section.offset)
 	name_builder := strings.builder_make_len_cap(0, 20)
-	ds: Dwarf_Sections
+	ds: Sections
 	dynamic_header: ^Elf_Section_Header
 	for &header in elf_section_headers {
 		for i := header.name_offset;; i += 1 {
@@ -259,7 +260,7 @@ parse_elf :: proc(fd: ^os.File) -> Parse_Elf_Error {
 			strings.write_byte(&name_builder, ch)
 		}
 		header.name = strings.clone_from_bytes(name_builder.buf[:])
-		dwarf_sections_get_from_elf_header(&ds, &header, fd)
+		sections_get_from_elf_header(&ds, &header, fd)
 		if header.name == ".dynamic" {
 			dynamic_header = &header
 		}
@@ -368,7 +369,7 @@ Elf_Section_Header :: struct {
 	name:        string,
 }
 
-Dwarf_Sections :: struct {
+Sections :: struct {
 	abbrev:      []byte,
 	line:        []byte,
 	info:        []byte,
@@ -391,7 +392,7 @@ Dwarf_Sections :: struct {
 	types:       []byte,
 }
 
-dwarf_sections_delete :: proc(ds: ^Dwarf_Sections) {
+sections_delete :: proc(ds: ^Sections) {
 	delete(ds.abbrev)
 	delete(ds.line)
 	delete(ds.info)
@@ -414,11 +415,7 @@ dwarf_sections_delete :: proc(ds: ^Dwarf_Sections) {
 	delete(ds.types)
 }
 
-dwarf_sections_get_from_elf_header :: proc(
-	ds: ^Dwarf_Sections,
-	header: ^Elf_Section_Header,
-	fd: ^os.File,
-) {
+sections_get_from_elf_header :: proc(ds: ^Sections, header: ^Elf_Section_Header, fd: ^os.File) {
 	buf := make([]byte, header.size)
 	os.read_at(fd, buf, cast(i64)header.offset)
 
@@ -467,24 +464,24 @@ dwarf_sections_get_from_elf_header :: proc(
 }
 
 Abbrev_Table :: struct {
-	offset: int,
-	decls:  map[u64]Abbrev_Decl,
+	offset:  int,
+	abbrevs: map[u64]Abbrev,
 }
 
-Abbrev_Decl :: struct {
+Abbrev :: struct {
 	code:         u64,
-	tag:          Dwarf_Tag,
+	tag:          Tag,
 	has_children: u8,
-	attributes:   [dynamic]Abbrev_Attribute,
+	attributes:   [dynamic]Attribute,
 }
 
-Abbrev_Attribute :: struct {
-	name:               u64,
-	form:               Dwarf_Form,
+Attribute :: struct {
+	name:               Attribute_Name,
+	form:               Attribute_Form,
 	implicit_const_val: i64,
 }
 
-Dwarf_Form :: enum u64 {
+Attribute_Form :: enum u64 {
 	Addr           = 0x01,
 	Block2         = 0x03,
 	Block4         = 0x04,
@@ -567,12 +564,12 @@ abbrev_section_to_abbrev_tables :: proc(abbrev_section: []byte) -> [dynamic]Abbr
 
 	for !bytes.buffer_is_empty(&buf) {
 		table: Abbrev_Table = {
-			offset = buf.off,
-			decls  = make(map[u64]Abbrev_Decl),
+			offset  = buf.off,
+			abbrevs = make(map[u64]Abbrev),
 		}
 		for {
-			decl: Abbrev_Decl = {
-				attributes = make([dynamic]Abbrev_Attribute, 0, 10),
+			decl: Abbrev = {
+				attributes = make([dynamic]Attribute, 0, 10),
 			}
 			code_val, code_bytes_read, uleb_code_err := _decode_uleb_buffer(&buf)
 			decl.code = code_val
@@ -580,18 +577,18 @@ abbrev_section_to_abbrev_tables :: proc(abbrev_section: []byte) -> [dynamic]Abbr
 				break // finished this decl
 			}
 			tag_val, tag_bytes_read, uleb_tag_err := _decode_uleb_buffer(&buf)
-			decl.tag = cast(Dwarf_Tag)tag_val
+			decl.tag = cast(Tag)tag_val
 			read_err: io.Error
 			decl.has_children, read_err = bytes.buffer_read_byte(&buf)
 
 			for {
-				attr: Abbrev_Attribute
+				attr: Attribute
 				name_val, name_bytes_read, uleb_name_err := _decode_uleb_buffer(&buf)
-				attr.name = name_val
+				attr.name = cast(Attribute_Name)name_val
 				form_val, form_bytes_read, uleb_form_err := _decode_uleb_buffer(&buf)
-				attr.form = cast(Dwarf_Form)form_val
+				attr.form = cast(Attribute_Form)form_val
 
-				if cast(u64)attr.form | attr.name == 0 {
+				if attr.form == nil && attr.name == nil {
 					break
 				}
 
@@ -603,19 +600,21 @@ abbrev_section_to_abbrev_tables :: proc(abbrev_section: []byte) -> [dynamic]Abbr
 				append(&decl.attributes, attr)
 			}
 
-			table.decls[decl.code] = decl
+			table.abbrevs[decl.code] = decl
 		}
 		append(&tables, table)
 	}
 	return tables
 }
 
-Compilation_Unit :: struct {
-	header: ^Compilation_Unit_Header,
-	dies:   [dynamic]Debugging_Information_Entry,
+// Compilation unit
+CU :: struct {
+	header:    ^CU_Header,
+	dies:      [dynamic]DIE,
+	addr_base: u64,
 }
 
-Compilation_Unit_Header :: struct {
+CU_Header :: struct {
 	length:              uint,
 	version:             u16,
 	unit_type:           Unit_Header_Type,
@@ -638,10 +637,11 @@ Unit_Header_Type :: enum u8 {
 	Hi_User       = 0xff,
 }
 
-Debugging_Information_Entry :: struct {
+// Debugging information entry
+DIE :: struct {
 	offset: int,
 	depth:  int,
-	tag:    Dwarf_Tag,
+	tag:    Tag,
 	forms:  [dynamic]Form,
 }
 
@@ -682,9 +682,9 @@ Form_Class :: enum {
 compilation_unit_from_bytes :: proc(
 	info_section: []byte,
 	abbrev_tables: []Abbrev_Table,
-	sections: ^Dwarf_Sections,
-) -> [dynamic]Compilation_Unit {
-	cus := make([dynamic]Compilation_Unit, 0, 10)
+	sections: ^Sections,
+) -> [dynamic]CU {
+	cus := make([dynamic]CU, 0, 10)
 	buf: bytes.Buffer
 	bytes.buffer_init(&buf, info_section)
 	for {
@@ -708,7 +708,7 @@ compilation_unit_from_bytes :: proc(
 	return cus
 }
 
-compilation_unit_header_from_buf :: proc(buf: ^bytes.Buffer) -> (cuh: Compilation_Unit_Header) {
+compilation_unit_header_from_buf :: proc(buf: ^bytes.Buffer) -> (cuh: CU_Header) {
 	off := 0
 
 	cuh_bytes: [24]byte
@@ -759,11 +759,11 @@ compilation_unit_header_from_buf :: proc(buf: ^bytes.Buffer) -> (cuh: Compilatio
 
 compilation_unit_parse :: proc(
 	buf: ^bytes.Buffer,
-	cu_header: ^Compilation_Unit_Header,
-	sections: ^Dwarf_Sections,
+	cu_header: ^CU_Header,
+	sections: ^Sections,
 	abbrev: ^Abbrev_Table,
-) -> Compilation_Unit {
-	dies := make([dynamic]Debugging_Information_Entry)
+) -> CU {
+	dies := make([dynamic]DIE)
 	die_tree_depth := 0
 	for {
 		abbrev_code, _, _ := _decode_uleb_buffer(buf)
@@ -775,21 +775,28 @@ compilation_unit_parse :: proc(
 			continue
 		}
 
-		decl := abbrev.decls[abbrev_code]
-		die := Debugging_Information_Entry {
+		abbrev := &abbrev.abbrevs[abbrev_code]
+		die := DIE {
 			offset = buf.off,
 			depth  = die_tree_depth,
-			tag    = decl.tag,
+			tag    = abbrev.tag,
 			forms  = make([dynamic]Form),
 		}
 
-		for &attr in decl.attributes {
+		addr_base := 0
+		for &a in abbrev.attributes {
+			if a.name == .Addr_Base {
+				break
+			}
+		}
+
+		for &attr in abbrev.attributes {
 			form := choose_form_advance_buf(buf, cu_header, sections, &attr)
 			append(&die.forms, form)
 		}
 
 		append(&dies, die)
-		if decl.has_children == 1 {
+		if abbrev.has_children == 1 {
 			die_tree_depth += 1
 		}
 	}
@@ -798,9 +805,9 @@ compilation_unit_parse :: proc(
 
 choose_form_advance_buf :: proc(
 	buf: ^bytes.Buffer,
-	cu_header: ^Compilation_Unit_Header,
-	sections: ^Dwarf_Sections,
-	attr: ^Abbrev_Attribute,
+	cu_header: ^CU_Header,
+	sections: ^Sections,
+	attr: ^Attribute,
 ) -> Form {
 	form: Form
 
@@ -840,6 +847,27 @@ choose_form_advance_buf :: proc(
 		bytes.buffer_read(buf, val[:])
 		form.data = slice.to_type(val[:], uintptr)
 		form.class = .Address
+	case .Addrx:
+		form.data, _, _ = _decode_uleb_buffer(buf)
+		form.class = .Address
+	case .Addrx1:
+		form.data, _ = bytes.buffer_read_byte(buf)
+		form.class = .Address
+	case .Addrx2:
+		val: [2]byte
+		bytes.buffer_read(buf, val[:])
+		form.data = slice.to_type(val[:], u16)
+	case .Addrx3:
+		val_bytes: [3]byte
+		bytes.buffer_read(buf, val_bytes[:])
+		val: u32
+		// todo: handle different endiannes
+		mem.copy(&val, raw_data(val_bytes[:]), 3)
+		form.data = val
+	case .Addrx4:
+		val: [4]byte
+		bytes.buffer_read(buf, val[:])
+		form.data = slice.to_type(val[:], u32)
 	// references
 	case .Ref_Addr:
 		form.data = _read_offset(buf, cu_header.is_32)
@@ -873,6 +901,28 @@ choose_form_advance_buf :: proc(
 		form.data = buffer_cstring_to_string(buf)
 		form.class = .String
 	case .Strp:
+		off := _read_offset(buf, cu_header.is_32)
+		str_section := sections.str[off:]
+		str_buf: bytes.Buffer
+		bytes.buffer_init(&str_buf, str_section[:])
+		defer bytes.buffer_destroy(&str_buf)
+		form.data = buffer_cstring_to_string(&str_buf)
+		form.class = .String
+	case .Line_Strp:
+		off := _read_offset(buf, cu_header.is_32)
+		str_section := sections.line_str[off:]
+		str_buf: bytes.Buffer
+		bytes.buffer_init(&str_buf, str_section[:])
+		defer bytes.buffer_destroy(&str_buf)
+		form.data = buffer_cstring_to_string(&str_buf)
+		form.class = .String
+	// dwarf expression
+	case .Exprloc:
+		length, _, _ := _decode_uleb_buffer(buf)
+		expr_buf := make([]byte, length)
+		bytes.buffer_read(buf, expr_buf)
+		form.data = expr_buf
+		form.class = .Exprloc
 	}
 	return form
 }
