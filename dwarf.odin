@@ -12,6 +12,7 @@ import "core:strings"
 
 MAGIC :: []byte{'\n', 'E', 'L', 'F'}
 
+vari: int = ---
 Parse_Elf_Error :: enum {
 	None,
 	Incorrect_Magic,
@@ -670,7 +671,7 @@ Form_Class :: enum {
 	Flag,
 	Lineptr,
 	Loclist,
-	Loclistptr,
+	Loclistsptr,
 	Macptr,
 	Rnglist,
 	Rnglistsptr,
@@ -817,19 +818,24 @@ choose_form_advance_buf :: proc(
 		form.data, _ = bytes.buffer_read_byte(buf)
 		form.class = .Constant
 	case .Data2:
-		val: [2]byte
+		val := make([]byte, 2)
 		bytes.buffer_read(buf, val[:])
-		form.data = slice.to_type(val[:], u16)
+		form.data = val
 		form.class = .Constant
 	case .Data4:
-		val: [4]byte
+		val := make([]byte, 4)
 		bytes.buffer_read(buf, val[:])
-		form.data = slice.to_type(val[:], u32)
+		form.data = val
 		form.class = .Constant
 	case .Data8:
-		val: [8]byte
+		val := make([]byte, 8)
 		bytes.buffer_read(buf, val[:])
-		form.data = slice.to_type(val[:], u64)
+		form.data = val
+		form.class = .Constant
+	case .Data16:
+		data_bytes := make([]byte, 16)
+		bytes.buffer_read(buf, data_bytes[:])
+		form.data = data_bytes
 		form.class = .Constant
 	case .Sdata:
 		form.data, _, _ = _decode_ileb_buffer(buf)
@@ -890,6 +896,9 @@ choose_form_advance_buf :: proc(
 		bytes.buffer_read(buf, val[:])
 		form.data = slice.to_type(val[:], u64)
 		form.class = .Reference
+	case .Ref_Udata:
+		form.data, _, _ = _decode_uleb_buffer(buf)
+		form.class = .Reference
 	// flags
 	case .Flag:
 		form.data, _ = bytes.buffer_read_byte(buf)
@@ -923,6 +932,72 @@ choose_form_advance_buf :: proc(
 		bytes.buffer_read(buf, expr_buf)
 		form.data = expr_buf
 		form.class = .Exprloc
+	// addrptr, lineptr, loclist, macptr, loclistsptr, rnglist, rnglistsptr, stroffsetsptr
+	case .Sec_Offset:
+		form.data = _read_offset(buf, cu_header.is_32)
+		#partial switch attr.name {
+		case .Addr_Base:
+			form.class = .Addrptr
+		case .Stmt_List:
+			form.class = .Lineptr
+		case .Location,
+		     .String_Length,
+		     .Return_Addr,
+		     .Data_Member_Location,
+		     .Frame_Base,
+		     .Segment,
+		     .Static_Link,
+		     .Use_Location,
+		     .Vtable_Elem_Location:
+			form.class = .Loclist
+		case .Loclists_Base:
+			form.class = .Loclistsptr
+		case .Macro_Info, .Macros:
+			form.class = .Macptr
+		case .Start_Scope, .Ranges:
+			form.class = .Rnglist
+		case .Rnglists_Base:
+			form.class = .Rnglistsptr
+		case .Str_Offsets_Base:
+			form.class = .Stroffsetsptr
+		}
+	// block
+	case .Block1:
+		length, _ := bytes.buffer_read_byte(buf)
+		block_bytes := make([]byte, length)
+		bytes.buffer_read(buf, block_bytes)
+		form.data = block_bytes
+		form.class = .Block
+	case .Block2:
+		len_bytes: [2]byte
+		bytes.buffer_read(buf, len_bytes[:])
+		length := slice.to_type(len_bytes[:], u16)
+		block_bytes := make([]byte, length)
+		bytes.buffer_read(buf, block_bytes)
+		form.data = block_bytes
+		form.class = .Block
+	case .Block4:
+		len_bytes: [4]byte
+		bytes.buffer_read(buf, len_bytes[:])
+		length := slice.to_type(len_bytes[:], u16)
+		block_bytes := make([]byte, length)
+		bytes.buffer_read(buf, block_bytes)
+		form.data = block_bytes
+		form.class = .Block
+	case .Block:
+		length, _, _ := _decode_uleb_buffer(buf)
+		block_bytes := make([]byte, length)
+		bytes.buffer_read(buf, block_bytes)
+		form.data = block_bytes
+		form.class = .Block
+	// loclist
+	case .Loclistx:
+		form.data, _, _ = _decode_uleb_buffer(buf)
+		form.class = .Loclist
+	// rnglist
+	case .Rnglistx:
+		form.data, _, _ = _decode_uleb_buffer(buf)
+		form.class = .Rnglist
 	}
 	return form
 }
