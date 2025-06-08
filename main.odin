@@ -7,5 +7,5 @@ import os "core:os/os2"
 main :: proc() {
 	fd, open_err := os.open("./test_program/cloop")
 	assert(open_err == nil)
-	fmt.println(parse_elf(fd))
+	fmt.println(parse_elf(&fd.stream))
 }

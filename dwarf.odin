@@ -5,21 +5,24 @@ import "core:encoding/varint"
 import "core:fmt"
 import "core:io"
 import "core:mem"
-import os "core:os/os2"
 import "core:reflect"
 import "core:slice"
 import "core:strings"
 
-MAGIC :: []byte{'\n', 'E', 'L', 'F'}
+MAGIC :: []byte{127, 'E', 'L', 'F'}
 
-vari: int = ---
-Parse_Elf_Error :: enum {
+Elf_Ident_Error :: enum {
 	None,
 	Incorrect_Magic,
 	Incorrect_Ident_Class,
 	Incorrect_Ident_Data_Format,
 	Incorrect_Ident_Version,
 	Incorrect_Os_Abi,
+}
+
+Elf_Parse_Error :: union #shared_nil {
+	Elf_Ident_Error,
+	io.Error,
 }
 
 Elf_Class :: enum u8 {
@@ -83,7 +86,7 @@ Elf_Type :: enum u16 {
 	Hiproc = 0xffff,
 }
 
-Elf_Ehdr :: struct {
+Elf_Header :: struct {
 	ident:     Ident,
 	type:      Elf_Type,
 	machine:   Elf_Machine,
@@ -100,7 +103,7 @@ Elf_Ehdr :: struct {
 	shstrndx:  u16,
 }
 
-ident_init :: proc(ident: ^Ident, bytes: [16]byte) -> Parse_Elf_Error {
+ident_init :: proc(ident: ^Ident, bytes: [16]byte) -> Elf_Ident_Error {
 	ident.raw = bytes
 	ident.abi_version = ident.raw[8:]
 	valid_class, valid_format, valid_version, valid_abi: bool
@@ -154,41 +157,24 @@ ident_init :: proc(ident: ^Ident, bytes: [16]byte) -> Parse_Elf_Error {
 	return .None
 }
 
-parse_elf :: proc(fd: ^os.File) -> Parse_Elf_Error {
-	ident: [16]byte
-	_, magic_err := os.read(fd, ident[:])
-	assert(magic_err == nil)
-	if slice.equal(ident[:4], MAGIC) {
-		return .Incorrect_Magic
+elf_section_headers_read :: proc(
+	s: ^io.Stream,
+	eh: ^Elf_Header,
+	allocator := context.allocator,
+	temp_allocator := context.temp_allocator,
+) -> (
+	[]Elf_Section_Header,
+	io.Error,
+) {
+	elf_section_headers := make([]Elf_Section_Header, eh.shnum, allocator)
+	elf_section_headers_bytes := make([]byte, eh.shentsize * eh.shnum, temp_allocator)
+	defer delete(elf_section_headers_bytes, temp_allocator)
+
+	_, elf_section_read_err := io.read_at(s^, elf_section_headers_bytes, cast(i64)eh.shoff)
+	if elf_section_read_err != nil {
+		delete(elf_section_headers, allocator)
+		return elf_section_headers, elf_section_read_err
 	}
-
-	// Start getting Elf_Ehdr
-	elf_header: Elf_Ehdr
-	ident_init_err := ident_init(&elf_header.ident, ident)
-	elf_ehdr_bytes: [48]byte
-	_, elf_ehdr_read_err := os.read(fd, elf_ehdr_bytes[:])
-
-	elf_header.type = slice.to_type(elf_ehdr_bytes[:2], Elf_Type)
-	elf_header.machine = slice.to_type(elf_ehdr_bytes[2:4], Elf_Machine)
-	elf_header.version = slice.to_type(elf_ehdr_bytes[4:8], Elf_Version)
-	elf_header.entry = slice.to_type(elf_ehdr_bytes[8:16], uintptr)
-	elf_header.phoff = slice.to_type(elf_ehdr_bytes[16:24], uintptr)
-	elf_header.shoff = slice.to_type(elf_ehdr_bytes[24:32], uintptr)
-	elf_header.flags = slice.to_type(elf_ehdr_bytes[32:36], u32)
-	elf_header.ehsize = slice.to_type(elf_ehdr_bytes[36:38], u16)
-	elf_header.phentsize = slice.to_type(elf_ehdr_bytes[38:40], u16)
-	elf_header.phnum = slice.to_type(elf_ehdr_bytes[40:42], u16)
-	elf_header.shentsize = slice.to_type(elf_ehdr_bytes[42:44], u16)
-	elf_header.shnum = slice.to_type(elf_ehdr_bytes[44:46], u16)
-	elf_header.shstrndx = slice.to_type(elf_ehdr_bytes[46:], u16)
-	// End getting Elf_Ehdr
-
-	// Start getting elf section headers
-	elf_section_headers := make([]Elf_Section_Header, elf_header.shnum)
-	elf_section_headers_bytes := make([]byte, elf_header.shentsize * elf_header.shnum)
-	defer delete(elf_section_headers_bytes)
-
-	_, elf_section_read_err := os.read_at(fd, elf_section_headers_bytes, cast(i64)elf_header.shoff)
 
 	sections_amount := len(elf_section_headers_bytes) / 64
 	for i := 0; i < sections_amount; i += 1 {
@@ -243,13 +229,18 @@ parse_elf :: proc(fd: ^os.File) -> Parse_Elf_Error {
 			uintptr,
 		)
 	}
-	// Finish getting elf section headers basic data
+	return elf_section_headers, nil
+}
+
+parse_elf :: proc(s: ^io.Stream) -> Elf_Parse_Error {
+	elf_header := elf_header_read(s) or_return
+	elf_section_headers := elf_section_headers_read(s, &elf_header) or_return
 
 	// Start getting elf section headers names
 	names_section := elf_section_headers[elf_header.shstrndx]
-	names_buf := make([]byte, names_section.size)
-	_, names_section_read_err := os.read_at(fd, names_buf, cast(i64)names_section.offset)
-	name_builder := strings.builder_make_len_cap(0, 20)
+	names_buf := make([]byte, names_section.size, allocator = context.temp_allocator)
+	_, names_section_read_err := io.read_at(s^, names_buf, cast(i64)names_section.offset)
+	name_builder := strings.builder_make_len_cap(0, 20, allocator = context.temp_allocator)
 	ds: Sections
 	dynamic_header: ^Elf_Section_Header
 	for &header in elf_section_headers {
@@ -261,29 +252,75 @@ parse_elf :: proc(fd: ^os.File) -> Parse_Elf_Error {
 			strings.write_byte(&name_builder, ch)
 		}
 		header.name = strings.clone_from_bytes(name_builder.buf[:])
-		sections_get_from_elf_header(&ds, &header, fd)
+		sections_set_from_elf_header(&ds, &header, s)
 		if header.name == ".dynamic" {
 			dynamic_header = &header
 		}
 		strings.builder_reset(&name_builder)
 	}
 	strings.builder_destroy(&name_builder)
-	delete(names_buf)
+	delete(names_buf, allocator = context.temp_allocator)
 	// Finish getting elf section headers names
 	// Finish getting all elf section headers data
 
-	// Start determining if elf file is pie(position independent executable)
-	dynamic_buf := make([]byte, dynamic_header.size)
-	os.read_at(fd, dynamic_buf, cast(i64)dynamic_header.offset)
-	pie: bool
-	for i := 0; i < len(dynamic_buf) / 8; i += 2 {
+	pie := elf_is_pie(s, dynamic_header)
+
+	return nil
+}
+
+elf_header_read :: proc(s: ^io.Stream) -> (Elf_Header, Elf_Parse_Error) {
+	elf_header: Elf_Header
+	ident: [16]byte
+	_, magic_err := io.read(s^, ident[:])
+	if !slice.equal(ident[:4], MAGIC) {
+		return elf_header, .Incorrect_Magic
+	}
+
+	ident_init_err := ident_init(&elf_header.ident, ident)
+	if ident_init_err != .None {
+		return elf_header, ident_init_err
+	}
+
+	elf_header_bytes: [48]byte
+	_, elf_header_read_err := io.read(s^, elf_header_bytes[:])
+	if elf_header_read_err != nil {
+		return elf_header, elf_header_read_err
+	}
+
+	elf_header.type = slice.to_type(elf_header_bytes[:2], Elf_Type)
+	elf_header.machine = slice.to_type(elf_header_bytes[2:4], Elf_Machine)
+	elf_header.version = slice.to_type(elf_header_bytes[4:8], Elf_Version)
+	elf_header.entry = slice.to_type(elf_header_bytes[8:16], uintptr)
+	elf_header.phoff = slice.to_type(elf_header_bytes[16:24], uintptr)
+	elf_header.shoff = slice.to_type(elf_header_bytes[24:32], uintptr)
+	elf_header.flags = slice.to_type(elf_header_bytes[32:36], u32)
+	elf_header.ehsize = slice.to_type(elf_header_bytes[36:38], u16)
+	elf_header.phentsize = slice.to_type(elf_header_bytes[38:40], u16)
+	elf_header.phnum = slice.to_type(elf_header_bytes[40:42], u16)
+	elf_header.shentsize = slice.to_type(elf_header_bytes[42:44], u16)
+	elf_header.shnum = slice.to_type(elf_header_bytes[44:46], u16)
+	elf_header.shstrndx = slice.to_type(elf_header_bytes[46:], u16)
+
+	return elf_header, nil
+}
+
+// determines if elf file is PIE(position independent executable)
+elf_is_pie :: proc(
+	s: ^io.Stream,
+	h: ^Elf_Section_Header,
+	allocator := context.temp_allocator,
+) -> bool {
+	pie := false
+	buf := make([]byte, h.size, allocator)
+	io.read_at(s^, buf, cast(i64)h.offset)
+	for i := 0; i < len(buf) / 8; i += 2 {
 		off := i * 8
-		if off + 16 >= len(dynamic_buf) {
+		if off + 16 >= len(buf) {
 			break
 		}
 
-		tag := slice.to_type(dynamic_buf[off:off + 8], uintptr)
-		val := slice.to_type(dynamic_buf[off + 8:off + 16], uintptr)
+		tag := slice.to_type(buf[off:off + 8], uintptr)
+		val := slice.to_type(buf[off + 8:off + 16], uintptr)
 
 		if tag == 0x6fff_fffb { 	// DT_FLAGS_1
 			if val & 0x0800_0000 > 0 { 	// DF_1_PIE
@@ -292,10 +329,9 @@ parse_elf :: proc(fd: ^os.File) -> Parse_Elf_Error {
 			}
 		}
 	}
-	delete(dynamic_buf)
-	// Finish determining if elf file is pie
+	delete(buf, allocator)
 
-	return .None
+	return pie
 }
 
 Section_Header_Type :: enum u32 {
@@ -416,9 +452,9 @@ sections_delete :: proc(ds: ^Sections) {
 	delete(ds.types)
 }
 
-sections_get_from_elf_header :: proc(ds: ^Sections, header: ^Elf_Section_Header, fd: ^os.File) {
+sections_set_from_elf_header :: proc(ds: ^Sections, header: ^Elf_Section_Header, s: ^io.Stream) {
 	buf := make([]byte, header.size)
-	os.read_at(fd, buf, cast(i64)header.offset)
+	io.read_at(s^, buf, cast(i64)header.offset)
 
 	switch header.name {
 	case ".debug_abbrev":
@@ -812,7 +848,7 @@ choose_form_advance_buf :: proc(
 ) -> Form {
 	form: Form
 
-	switch attr.form {
+	#partial switch attr.form {
 	// constants
 	case .Data1:
 		form.data, _ = bytes.buffer_read_byte(buf)
