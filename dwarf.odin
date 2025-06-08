@@ -166,75 +166,54 @@ elf_section_headers_read :: proc(
 	[]Elf_Section_Header,
 	io.Error,
 ) {
-	elf_section_headers := make([]Elf_Section_Header, eh.shnum, allocator)
-	elf_section_headers_bytes := make([]byte, eh.shentsize * eh.shnum, temp_allocator)
-	defer delete(elf_section_headers_bytes, temp_allocator)
+	headers := make([]Elf_Section_Header, eh.shnum, allocator)
+	data := make([]byte, eh.shentsize * eh.shnum, temp_allocator)
+	defer delete(data, temp_allocator)
 
-	_, elf_section_read_err := io.read_at(s^, elf_section_headers_bytes, cast(i64)eh.shoff)
-	if elf_section_read_err != nil {
-		delete(elf_section_headers, allocator)
-		return elf_section_headers, elf_section_read_err
+	_, section_read_err := io.read_at(s^, data, cast(i64)eh.shoff)
+	if section_read_err != nil {
+		return headers, section_read_err
 	}
 
-	sections_amount := len(elf_section_headers_bytes) / 64
+	sections_amount := len(data) / 64
 	for i := 0; i < sections_amount; i += 1 {
-		offset := i * 64
-		elf_section_headers[i].name_offset = slice.to_type(
-			elf_section_headers_bytes[offset:offset + 4],
-			u32,
-		)
-		offset += size_of(u32)
-		elf_section_headers[i].type = slice.to_type(
-			elf_section_headers_bytes[offset:offset + size_of(Section_Header_Type)],
+		off := i * 64
+		headers[i].name_offset = slice.to_type(data[off:off + 4], u32)
+		off += size_of(u32)
+		headers[i].type = slice.to_type(
+			data[off:off + size_of(Section_Header_Type)],
 			Section_Header_Type,
 		)
-		offset += size_of(Section_Header_Type)
-		elf_section_headers[i].flags = slice.to_type(
-			elf_section_headers_bytes[offset:offset + size_of(Section_Attribute_Flags)],
+		off += size_of(Section_Header_Type)
+		headers[i].flags = slice.to_type(
+			data[off:off + size_of(Section_Attribute_Flags)],
 			Section_Attribute_Flags,
 		)
-		offset += size_of(Section_Attribute_Flags)
-		elf_section_headers[i].addr = slice.to_type(
-			elf_section_headers_bytes[offset:offset + size_of(uintptr)],
-			uintptr,
-		)
-		offset += size_of(uintptr)
-		elf_section_headers[i].offset = slice.to_type(
-			elf_section_headers_bytes[offset:offset + size_of(uintptr)],
-			uintptr,
-		)
-		offset += size_of(uintptr)
-		elf_section_headers[i].size = slice.to_type(
-			elf_section_headers_bytes[offset:offset + size_of(uintptr)],
-			uintptr,
-		)
-		offset += size_of(uintptr)
-		elf_section_headers[i].link = slice.to_type(
-			elf_section_headers_bytes[offset:offset + size_of(u32)],
-			u32,
-		)
-		offset += size_of(u32)
-		elf_section_headers[i].info = slice.to_type(
-			elf_section_headers_bytes[offset:offset + size_of(u32)],
-			u32,
-		)
-		offset += size_of(u32)
-		elf_section_headers[i].addralign = slice.to_type(
-			elf_section_headers_bytes[offset:offset + size_of(uintptr)],
-			uintptr,
-		)
-		offset += size_of(uintptr)
-		elf_section_headers[i].entsize = slice.to_type(
-			elf_section_headers_bytes[offset:offset + size_of(uintptr)],
-			uintptr,
-		)
+		off += size_of(Section_Attribute_Flags)
+		headers[i].addr = slice.to_type(data[off:off + size_of(uintptr)], uintptr)
+		off += size_of(uintptr)
+		headers[i].offset = slice.to_type(data[off:off + size_of(uintptr)], uintptr)
+		off += size_of(uintptr)
+		headers[i].size = slice.to_type(data[off:off + size_of(uintptr)], uintptr)
+		off += size_of(uintptr)
+		headers[i].link = slice.to_type(data[off:off + size_of(u32)], u32)
+		off += size_of(u32)
+		headers[i].info = slice.to_type(data[off:off + size_of(u32)], u32)
+		off += size_of(u32)
+		headers[i].addralign = slice.to_type(data[off:off + size_of(uintptr)], uintptr)
+		off += size_of(uintptr)
+		headers[i].entsize = slice.to_type(data[off:off + size_of(uintptr)], uintptr)
 	}
-	return elf_section_headers, nil
+	return headers, nil
 }
 
 parse_elf :: proc(s: ^io.Stream) -> Elf_Parse_Error {
 	elf_header := elf_header_read(s) or_return
-	elf_section_headers := elf_section_headers_read(s, &elf_header) or_return
+	elf_section_headers, elf_section_headers_err := elf_section_headers_read(s, &elf_header)
+	if elf_section_headers_err != nil {
+		delete(elf_section_headers)
+		return elf_section_headers_err
+	}
 
 	// Start getting elf section headers names
 	names_section := elf_section_headers[elf_header.shstrndx]
@@ -261,47 +240,52 @@ parse_elf :: proc(s: ^io.Stream) -> Elf_Parse_Error {
 	strings.builder_destroy(&name_builder)
 	delete(names_buf, allocator = context.temp_allocator)
 	// Finish getting elf section headers names
-	// Finish getting all elf section headers data
 
 	pie := elf_is_pie(s, dynamic_header)
+	fmt.printfln(
+		"Header: %#v\nSection Headers: %#v\nPie: %v",
+		elf_header,
+		elf_section_headers,
+		pie,
+	)
 
 	return nil
 }
 
 elf_header_read :: proc(s: ^io.Stream) -> (Elf_Header, Elf_Parse_Error) {
-	elf_header: Elf_Header
+	eh: Elf_Header
 	ident: [16]byte
 	_, magic_err := io.read(s^, ident[:])
 	if !slice.equal(ident[:4], MAGIC) {
-		return elf_header, .Incorrect_Magic
+		return eh, .Incorrect_Magic
 	}
 
-	ident_init_err := ident_init(&elf_header.ident, ident)
+	ident_init_err := ident_init(&eh.ident, ident)
 	if ident_init_err != .None {
-		return elf_header, ident_init_err
+		return eh, ident_init_err
 	}
 
-	elf_header_bytes: [48]byte
-	_, elf_header_read_err := io.read(s^, elf_header_bytes[:])
+	eh_bytes: [48]byte
+	_, elf_header_read_err := io.read(s^, eh_bytes[:])
 	if elf_header_read_err != nil {
-		return elf_header, elf_header_read_err
+		return eh, elf_header_read_err
 	}
 
-	elf_header.type = slice.to_type(elf_header_bytes[:2], Elf_Type)
-	elf_header.machine = slice.to_type(elf_header_bytes[2:4], Elf_Machine)
-	elf_header.version = slice.to_type(elf_header_bytes[4:8], Elf_Version)
-	elf_header.entry = slice.to_type(elf_header_bytes[8:16], uintptr)
-	elf_header.phoff = slice.to_type(elf_header_bytes[16:24], uintptr)
-	elf_header.shoff = slice.to_type(elf_header_bytes[24:32], uintptr)
-	elf_header.flags = slice.to_type(elf_header_bytes[32:36], u32)
-	elf_header.ehsize = slice.to_type(elf_header_bytes[36:38], u16)
-	elf_header.phentsize = slice.to_type(elf_header_bytes[38:40], u16)
-	elf_header.phnum = slice.to_type(elf_header_bytes[40:42], u16)
-	elf_header.shentsize = slice.to_type(elf_header_bytes[42:44], u16)
-	elf_header.shnum = slice.to_type(elf_header_bytes[44:46], u16)
-	elf_header.shstrndx = slice.to_type(elf_header_bytes[46:], u16)
+	eh.type = slice.to_type(eh_bytes[:2], Elf_Type)
+	eh.machine = slice.to_type(eh_bytes[2:4], Elf_Machine)
+	eh.version = slice.to_type(eh_bytes[4:8], Elf_Version)
+	eh.entry = slice.to_type(eh_bytes[8:16], uintptr)
+	eh.phoff = slice.to_type(eh_bytes[16:24], uintptr)
+	eh.shoff = slice.to_type(eh_bytes[24:32], uintptr)
+	eh.flags = slice.to_type(eh_bytes[32:36], u32)
+	eh.ehsize = slice.to_type(eh_bytes[36:38], u16)
+	eh.phentsize = slice.to_type(eh_bytes[38:40], u16)
+	eh.phnum = slice.to_type(eh_bytes[40:42], u16)
+	eh.shentsize = slice.to_type(eh_bytes[42:44], u16)
+	eh.shnum = slice.to_type(eh_bytes[44:46], u16)
+	eh.shstrndx = slice.to_type(eh_bytes[46:], u16)
 
-	return elf_header, nil
+	return eh, nil
 }
 
 // determines if elf file is PIE(position independent executable)
@@ -452,51 +436,56 @@ sections_delete :: proc(ds: ^Sections) {
 	delete(ds.types)
 }
 
-sections_set_from_elf_header :: proc(ds: ^Sections, header: ^Elf_Section_Header, s: ^io.Stream) {
-	buf := make([]byte, header.size)
+sections_set_from_elf_header :: proc(
+	sections: ^Sections,
+	header: ^Elf_Section_Header,
+	s: ^io.Stream,
+	allocator := context.allocator,
+) {
+	buf := make([]byte, header.size, allocator)
 	io.read_at(s^, buf, cast(i64)header.offset)
 
 	switch header.name {
 	case ".debug_abbrev":
-		ds.abbrev = buf
+		sections.abbrev = buf
 	case ".debug_line":
-		ds.line = buf
+		sections.line = buf
 	case ".debug_info":
-		ds.info = buf
+		sections.info = buf
 	case ".debug_addr":
-		ds.addr = buf
+		sections.addr = buf
 	case ".debug_aranges":
-		ds.aranges = buf
+		sections.aranges = buf
 	case ".debug_frame":
-		ds.frame = buf
+		sections.frame = buf
 	case ".eh_frame":
-		ds.eh_frame = buf
+		sections.eh_frame = buf
 	case ".debug_line_str":
-		ds.line_str = buf
+		sections.line_str = buf
 	case ".debug_loc":
-		ds.loc = buf
+		sections.loc = buf
 	case ".debug_loclists":
-		ds.loclists = buf
+		sections.loclists = buf
 	case ".debug_names":
-		ds.names = buf
+		sections.names = buf
 	case ".debug_macinfo":
-		ds.macinfo = buf
+		sections.macinfo = buf
 	case ".debug_macro":
-		ds.macro = buf
+		sections.macro = buf
 	case ".debug_pubnames":
-		ds.pubnames = buf
+		sections.pubnames = buf
 	case ".debug_pubtypes":
-		ds.pubtypes = buf
+		sections.pubtypes = buf
 	case ".debug_ranges":
-		ds.ranges = buf
+		sections.ranges = buf
 	case ".debug_rnglists":
-		ds.rnglists = buf
+		sections.rnglists = buf
 	case ".debug_str":
-		ds.str = buf
+		sections.str = buf
 	case ".debug_str_offsets":
-		ds.str_offsets = buf
+		sections.str_offsets = buf
 	case ".debug_types":
-		ds.types = buf
+		sections.types = buf
 	}
 }
 
@@ -593,30 +582,33 @@ _decode_ileb_buffer :: #force_inline proc(
 	return
 }
 
-abbrev_section_to_abbrev_tables :: proc(abbrev_section: []byte) -> [dynamic]Abbrev_Table {
+abbrev_section_to_abbrev_tables :: proc(
+	abbrev_section: []byte,
+	allocator := context.allocator,
+) -> [dynamic]Abbrev_Table {
 	buf: bytes.Buffer
 	bytes.buffer_init(&buf, abbrev_section)
 	defer bytes.buffer_destroy(&buf)
-	tables := make([dynamic]Abbrev_Table, 0, 10)
+	tables := make([dynamic]Abbrev_Table, 0, 10, allocator)
 
 	for !bytes.buffer_is_empty(&buf) {
 		table: Abbrev_Table = {
 			offset  = buf.off,
-			abbrevs = make(map[u64]Abbrev),
+			abbrevs = make(map[u64]Abbrev, allocator),
 		}
 		for {
-			decl: Abbrev = {
-				attributes = make([dynamic]Attribute, 0, 10),
-			}
 			code_val, code_bytes_read, uleb_code_err := _decode_uleb_buffer(&buf)
-			decl.code = code_val
-			if decl.code == 0 {
+			if code_val == 0 {
 				break // finished this decl
 			}
+			abbrev := &table.abbrevs[code_val]
+			abbrev.attributes = make([dynamic]Attribute, 0, 10, allocator)
+			abbrev.code = code_val
+
 			tag_val, tag_bytes_read, uleb_tag_err := _decode_uleb_buffer(&buf)
-			decl.tag = cast(Tag)tag_val
+			abbrev.tag = cast(Tag)tag_val
 			read_err: io.Error
-			decl.has_children, read_err = bytes.buffer_read_byte(&buf)
+			abbrev.has_children, read_err = bytes.buffer_read_byte(&buf)
 
 			for {
 				attr: Attribute
@@ -634,10 +626,8 @@ abbrev_section_to_abbrev_tables :: proc(abbrev_section: []byte) -> [dynamic]Abbr
 					attr.implicit_const_val = const_val
 				}
 
-				append(&decl.attributes, attr)
+				append(&abbrev.attributes, attr)
 			}
-
-			table.abbrevs[decl.code] = decl
 		}
 		append(&tables, table)
 	}
@@ -687,7 +677,7 @@ Form :: struct {
 	class: Form_Class,
 }
 
-Form_Data :: union #no_nil {
+Form_Data :: union {
 	u8,
 	u16,
 	u32,
@@ -720,8 +710,9 @@ compilation_unit_from_bytes :: proc(
 	info_section: []byte,
 	abbrev_tables: []Abbrev_Table,
 	sections: ^Sections,
+	allocator := context.allocator,
 ) -> [dynamic]CU {
-	cus := make([dynamic]CU, 0, 10)
+	cus := make([dynamic]CU, 0, 10, allocator)
 	buf: bytes.Buffer
 	bytes.buffer_init(&buf, info_section)
 	for {
@@ -798,9 +789,10 @@ compilation_unit_parse :: proc(
 	buf: ^bytes.Buffer,
 	cu_header: ^CU_Header,
 	sections: ^Sections,
-	abbrev: ^Abbrev_Table,
+	abbrev_table: ^Abbrev_Table,
+	allocator := context.allocator,
 ) -> CU {
-	dies := make([dynamic]DIE)
+	dies := make([dynamic]DIE, allocator)
 	die_tree_depth := 0
 	for {
 		abbrev_code, _, _ := _decode_uleb_buffer(buf)
@@ -812,12 +804,12 @@ compilation_unit_parse :: proc(
 			continue
 		}
 
-		abbrev := &abbrev.abbrevs[abbrev_code]
+		abbrev := &abbrev_table.abbrevs[abbrev_code]
 		die := DIE {
 			offset = buf.off,
 			depth  = die_tree_depth,
 			tag    = abbrev.tag,
-			forms  = make([dynamic]Form),
+			forms  = make([dynamic]Form, allocator),
 		}
 
 		addr_base := 0
@@ -943,23 +935,17 @@ choose_form_advance_buf :: proc(
 		form.data = []byte{1}
 		form.class = .Flag
 	case .String:
-		form.data = buffer_cstring_to_string(buf)
+		form.data = cstring_buf_to_string(buf.buf[:])
 		form.class = .String
 	case .Strp:
 		off := _read_offset(buf, cu_header.is_32)
 		str_section := sections.str[off:]
-		str_buf: bytes.Buffer
-		bytes.buffer_init(&str_buf, str_section[:])
-		defer bytes.buffer_destroy(&str_buf)
-		form.data = buffer_cstring_to_string(&str_buf)
+		form.data = cstring_buf_to_string(str_section)
 		form.class = .String
 	case .Line_Strp:
 		off := _read_offset(buf, cu_header.is_32)
 		str_section := sections.line_str[off:]
-		str_buf: bytes.Buffer
-		bytes.buffer_init(&str_buf, str_section[:])
-		defer bytes.buffer_destroy(&str_buf)
-		form.data = buffer_cstring_to_string(&str_buf)
+		form.data = cstring_buf_to_string(str_section)
 		form.class = .String
 	// dwarf expression
 	case .Exprloc:
@@ -1052,10 +1038,13 @@ _read_offset :: #force_inline proc(buf: ^bytes.Buffer, is_32: bool) -> u64 {
 	return val
 }
 
-buffer_cstring_to_string :: proc(buf: ^bytes.Buffer) -> string {
-	str := strings.builder_make_none()
+cstring_buf_to_string :: proc(bytes: []byte, allocator := context.temp_allocator) -> string {
+	str := strings.builder_make_none(allocator)
 	defer strings.builder_destroy(&str)
-	for b, _ := bytes.buffer_read_byte(buf); b != 0; b, _ = bytes.buffer_read_byte(buf) {
+	for b in bytes {
+		if b == 0 {
+			break
+		}
 		strings.write_byte(&str, b)
 	}
 	return strings.to_string(str)
