@@ -706,7 +706,7 @@ Form_Class :: enum {
 	Stroffsetsptr,
 }
 
-compilation_unit_from_bytes :: proc(
+cus_from_bytes :: proc(
 	info_section: []byte,
 	abbrev_tables: []Abbrev_Table,
 	sections: ^Sections,
@@ -719,7 +719,7 @@ compilation_unit_from_bytes :: proc(
 		if bytes.buffer_is_empty(&buf) {
 			break
 		}
-		cu_header := compilation_unit_header_from_buf(&buf)
+		cu_header := cu_header_from_buf(&buf)
 
 		abbrev_table := &abbrev_tables[0]
 		debug_abbrev_offset := cast(int)cu_header.debug_abbrev_offset
@@ -736,7 +736,7 @@ compilation_unit_from_bytes :: proc(
 	return cus
 }
 
-compilation_unit_header_from_buf :: proc(buf: ^bytes.Buffer) -> (cuh: CU_Header) {
+cu_header_from_buf :: proc(buf: ^bytes.Buffer) -> (cuh: CU_Header) {
 	off := 0
 
 	cuh_bytes: [24]byte
@@ -837,31 +837,32 @@ choose_form_advance_buf :: proc(
 	cu_header: ^CU_Header,
 	sections: ^Sections,
 	attr: ^Attribute,
+	allocator := context.allocator,
 ) -> Form {
 	form: Form
 
-	#partial switch attr.form {
+	switch attr.form {
 	// constants
 	case .Data1:
 		form.data, _ = bytes.buffer_read_byte(buf)
 		form.class = .Constant
 	case .Data2:
-		val := make([]byte, 2)
+		val := make([]byte, 2, allocator)
 		bytes.buffer_read(buf, val[:])
 		form.data = val
 		form.class = .Constant
 	case .Data4:
-		val := make([]byte, 4)
+		val := make([]byte, 4, allocator)
 		bytes.buffer_read(buf, val[:])
 		form.data = val
 		form.class = .Constant
 	case .Data8:
-		val := make([]byte, 8)
+		val := make([]byte, 8, allocator)
 		bytes.buffer_read(buf, val[:])
 		form.data = val
 		form.class = .Constant
 	case .Data16:
-		data_bytes := make([]byte, 16)
+		data_bytes := make([]byte, 16, allocator)
 		bytes.buffer_read(buf, data_bytes[:])
 		form.data = data_bytes
 		form.class = .Constant
@@ -934,6 +935,7 @@ choose_form_advance_buf :: proc(
 	case .Flag_Present:
 		form.data = []byte{1}
 		form.class = .Flag
+	// string
 	case .String:
 		form.data = cstring_buf_to_string(buf.buf[:])
 		form.class = .String
@@ -947,10 +949,33 @@ choose_form_advance_buf :: proc(
 		str_section := sections.line_str[off:]
 		form.data = cstring_buf_to_string(str_section)
 		form.class = .String
+	case .Strx1:
+		form.data, _ = bytes.buffer_read_byte(buf)
+		form.class = .String
+	case .Strx2:
+		val: [2]byte
+		bytes.buffer_read(buf, val[:])
+		form.data = slice.to_type(val[:], u16)
+		form.class = .String
+	case .Strx3:
+		val_bytes: [3]byte
+		bytes.buffer_read(buf, val_bytes[:])
+		val: u32
+		// todo: handle different endiannes
+		mem.copy(&val, raw_data(val_bytes[:]), 3)
+		form.data = val
+	case .Strx4:
+		val: [4]byte
+		bytes.buffer_read(buf, val[:])
+		form.data = slice.to_type(val[:], u32)
+		form.class = .String
+	case .Strx:
+		form.data, _, _ = _decode_uleb_buffer(buf)
+		form.class = .String
 	// dwarf expression
 	case .Exprloc:
 		length, _, _ := _decode_uleb_buffer(buf)
-		expr_buf := make([]byte, length)
+		expr_buf := make([]byte, length, allocator)
 		bytes.buffer_read(buf, expr_buf)
 		form.data = expr_buf
 		form.class = .Exprloc
@@ -986,7 +1011,7 @@ choose_form_advance_buf :: proc(
 	// block
 	case .Block1:
 		length, _ := bytes.buffer_read_byte(buf)
-		block_bytes := make([]byte, length)
+		block_bytes := make([]byte, length, allocator)
 		bytes.buffer_read(buf, block_bytes)
 		form.data = block_bytes
 		form.class = .Block
@@ -994,7 +1019,7 @@ choose_form_advance_buf :: proc(
 		len_bytes: [2]byte
 		bytes.buffer_read(buf, len_bytes[:])
 		length := slice.to_type(len_bytes[:], u16)
-		block_bytes := make([]byte, length)
+		block_bytes := make([]byte, length, allocator)
 		bytes.buffer_read(buf, block_bytes)
 		form.data = block_bytes
 		form.class = .Block
@@ -1002,13 +1027,13 @@ choose_form_advance_buf :: proc(
 		len_bytes: [4]byte
 		bytes.buffer_read(buf, len_bytes[:])
 		length := slice.to_type(len_bytes[:], u16)
-		block_bytes := make([]byte, length)
+		block_bytes := make([]byte, length, allocator)
 		bytes.buffer_read(buf, block_bytes)
 		form.data = block_bytes
 		form.class = .Block
 	case .Block:
 		length, _, _ := _decode_uleb_buffer(buf)
-		block_bytes := make([]byte, length)
+		block_bytes := make([]byte, length, allocator)
 		bytes.buffer_read(buf, block_bytes)
 		form.data = block_bytes
 		form.class = .Block
